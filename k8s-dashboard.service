@@ -1,0 +1,50 @@
+[Unit]
+Description=K8s Inspection Dashboard
+Documentation=https://github.com/k8s-dashboard
+After=network.target docker.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/k8s-dashboard
+
+# 环境变量
+Environment="PATH=/opt/k8s-dashboard/venv/bin"
+Environment="K8S_ENV=prod"
+Environment="DATA_DIR=/var/lib/k8s-dashboard"
+EnvironmentFile=-/opt/k8s-dashboard/.env
+
+# 执行命令
+ExecStart=/opt/k8s-dashboard/venv/bin/python -m uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 2
+
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s TERM $MAINPID
+
+# 重启策略
+Restart=always
+RestartSec=5
+
+# 资源限制
+LimitNOFILE=65535
+Nice=10
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=k8s-dashboard
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+
+# K8s 配置 (root 用户)
+Environment="HOME=/root"
+Environment="KUBECONFIG=/root/.kube/config"
+
+[Install]
+WantedBy=multi-user.target

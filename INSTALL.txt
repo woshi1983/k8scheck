@@ -1,0 +1,123 @@
+# K8s 巡检 Dashboard - 快速部署说明
+
+## 快速安装（推荐）
+
+```bash
+# 1. 上传文件到服务器
+scp k8s-dashboard-release.tar.gz install.sh ubuntu@<server-ip>:/tmp/
+
+# 2. SSH 登录服务器
+ssh ubuntu@<server-ip>
+
+# 3. 执行安装脚本
+cd /tmp
+chmod +x install.sh
+sudo ./install.sh
+
+# 4. 访问 Dashboard
+# 浏览器打开：http://<server-ip>:8000
+```
+
+## 手动安装
+
+```bash
+# 1. 解压
+sudo mkdir -p /opt/k8s-dashboard
+sudo tar -xzf /tmp/k8s-dashboard-release.tar.gz -C /opt/k8s-dashboard
+
+# 2. 安装依赖
+cd /opt/k8s-dashboard
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. 配置 K8s
+mkdir -p ~/.kube
+sudo cp /etc/kubernetes/admin.conf ~/.kube/config
+chmod 600 ~/.kube/config
+
+# 4. 启动服务
+sudo systemctl daemon-reload
+sudo systemctl enable k8s-dashboard
+sudo systemctl start k8s-dashboard
+```
+
+## 配置说明
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| K8S_ENV | 运行模式 | prod（生产环境） |
+| PORT | 服务端口 | 8000 |
+| KUBECONFIG | K8s 配置文件 | ~/.kube/config |
+
+## 服务管理
+
+```bash
+# 查看状态
+sudo systemctl status k8s-dashboard
+
+# 查看日志
+sudo journalctl -u k8s-dashboard -f
+
+# 重启服务
+sudo systemctl restart k8s-dashboard
+
+# 停止服务
+sudo systemctl stop k8s-dashboard
+```
+
+## API 测试
+
+```bash
+# 测试健康检查
+curl http://localhost:8000/
+
+# 测试节点列表
+curl http://localhost:8000/api/nodes
+
+# 测试异常数据（五大分类）
+curl http://localhost:8000/api/inspection/anomalies
+```
+
+## 文件说明
+
+```
+/opt/k8s-dashboard/
+├── main.py              # FastAPI 入口
+├── requirements.txt     # Python 依赖
+├── .env                 # 环境配置
+├── static/              # 前端静态文件
+├── venv/                # Python 虚拟环境
+└── install.sh           # 安装脚本（在/tmp 目录）
+```
+
+## 常见问题
+
+**Q: 服务启动失败？**
+```bash
+# 查看详细日志
+sudo journalctl -u k8s-dashboard -n 50
+
+# 手动运行测试
+cd /opt/k8s-dashboard
+source venv/bin/activate
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+**Q: 无法连接 K8s 集群？**
+```bash
+# 检查 kubeconfig
+kubectl get nodes
+
+# 如果没有权限，需要配置 ServiceAccount 或复制 admin.conf
+```
+
+**Q: 端口被占用？**
+```bash
+# 修改端口（编辑 install.sh 或手动配置）
+PORT=8080
+```
+
+---
+
+**详细文档**: 请参考 `LINUX_DEPLOY.md`
