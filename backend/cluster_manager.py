@@ -3,7 +3,8 @@
 管理当前选中的集群配置和 K8s 客户端
 """
 import logging
-from typing import Optional, Dict, List
+import threading
+from typing import Optional, Dict
 from pathlib import Path
 import tempfile
 import os
@@ -18,23 +19,25 @@ class ClusterManager:
     """集群管理器单例类"""
 
     _instance = None
-    _current_cluster_id: Optional[int] = None
-    _current_kubeconfig_path: Optional[str] = None
-    _core_v1 = None
-    _apps_v1 = None
-    _batch_v1 = None
+    _lock = threading.RLock()
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._current_cluster_id = None
+            cls._instance._current_kubeconfig_path = None
+            cls._instance._core_v1 = None
+            cls._instance._apps_v1 = None
+            cls._instance._batch_v1 = None
         return cls._instance
 
     def get_current_cluster_id(self) -> Optional[int]:
         """获取当前集群 ID"""
-        return self._current_cluster_id
+        with self._lock:
+            return self._current_cluster_id
 
     def set_current_cluster(self, cluster_id: int, kubeconfig_path: str,
-                            kubeconfig_content: str = None) -> bool:
+                            kubeconfig_content: Optional[str] = None) -> bool:
         """
         设置当前集群
 
@@ -49,7 +52,6 @@ class ClusterManager:
         try:
             # 如果提供了内容，写入临时文件
             if kubeconfig_content and not Path(kubeconfig_path).exists():
-                # 创建临时 kubeconfig 文件
                 fd, temp_path = tempfile.mkstemp(suffix='.yaml', prefix='kubeconfig_')
                 try:
                     os.write(fd, kubeconfig_content.encode('utf-8'))
@@ -70,12 +72,13 @@ class ClusterManager:
             v1 = client.CoreV1Api()
             v1.list_node()  # 测试连接
 
-            # 更新当前集群配置
-            self._current_cluster_id = cluster_id
-            self._current_kubeconfig_path = kubeconfig_path
-            self._core_v1 = None  # 重置客户端
-            self._apps_v1 = None
-            self._batch_v1 = None
+            # 更新当前集群配置（加锁保护共享状态）
+            with self._lock:
+                self._current_cluster_id = cluster_id
+                self._current_kubeconfig_path = kubeconfig_path
+                self._core_v1 = None  # 重置客户端
+                self._apps_v1 = None
+                self._batch_v1 = None
 
             logger.info(f"已切换到集群 ID: {cluster_id}, kubeconfig: {kubeconfig_path}")
             return True
@@ -89,38 +92,35 @@ class ClusterManager:
 
     def get_core_client(self) -> client.CoreV1Api:
         """获取 CoreV1 API 客户端"""
-        if self._core_v1 is None:
-            if not self._current_kubeconfig_path:
-                raise RuntimeError("未设置当前集群，请先调用 set_current_cluster()")
-
-            config.load_kube_config(config_file=self._current_kubeconfig_path)
-            self._core_v1 = client.CoreV1Api()
-
-        return self._core_v1
+        with self._lock:
+            if self._core_v1 is None:
+                if not self._current_kubeconfig_path:
+                    raise RuntimeError("未设置当前集群，请先调用 set_current_cluster()")
+                config.load_kube_config(config_file=self._current_kubeconfig_path)
+                self._core_v1 = client.CoreV1Api()
+            return self._core_v1
 
     def get_apps_client(self) -> client.AppsV1Api:
         """获取 AppsV1 API 客户端"""
-        if self._apps_v1 is None:
-            if not self._current_kubeconfig_path:
-                raise RuntimeError("未设置当前集群")
-
-            config.load_kube_config(config_file=self._current_kubeconfig_path)
-            self._apps_v1 = client.AppsV1Api()
-
-        return self._apps_v1
+        with self._lock:
+            if self._apps_v1 is None:
+                if not self._current_kubeconfig_path:
+                    raise RuntimeError("未设置当前集群")
+                config.load_kube_config(config_file=self._current_kubeconfig_path)
+                self._apps_v1 = client.AppsV1Api()
+            return self._apps_v1
 
     def get_batch_client(self) -> client.BatchV1Api:
         """获取 BatchV1 API 客户端（用于 Job）"""
-        if self._batch_v1 is None:
-            if not self._current_kubeconfig_path:
-                raise RuntimeError("未设置当前集群")
+        with self._lock:
+            if self._batch_v1 is None:
+                if not self._current_kubeconfig_path:
+                    raise RuntimeError("未设置当前集群")
+                config.load_kube_config(config_file=self._current_kubeconfig_path)
+                self._batch_v1 = client.BatchV1Api()
+            return self._batch_v1
 
-            config.load_kube_config(config_file=self._current_kubeconfig_path)
-            self._batch_v1 = client.BatchV1Api()
-
-        return self._batch_v1
-
-    def test_connection(self, kubeconfig_path: str, kubeconfig_content: str = None) -> Dict:
+    def test_connection(self, kubeconfig_path: str, kubeconfig_content: Optional[str] = None) -> Dict:
         """
         测试集群连接
 
@@ -141,22 +141,19 @@ class ClusterManager:
             'api_server_url': ''
         }
 
+        temp_path = None
         try:
-            # 如果提供了内容，写入临时文件
+            # 如果提供了内容且路径不存在，写入临时文件
             if kubeconfig_content and not Path(kubeconfig_path).exists():
                 fd, temp_path = tempfile.mkstemp(suffix='.yaml', prefix='kubeconfig_')
                 try:
                     os.write(fd, kubeconfig_content.encode('utf-8'))
                     os.close(fd)
-                    kubeconfig_path = temp_path
                 except Exception as e:
+                    os.close(fd)
                     result['message'] = f"创建临时文件失败：{e}"
                     return result
-                finally:
-                    try:
-                        os.unlink(temp_path)
-                    except:
-                        pass
+                kubeconfig_path = temp_path
 
             # 加载 kubeconfig
             config.load_kube_config(config_file=kubeconfig_path)
@@ -187,6 +184,12 @@ class ClusterManager:
             result['message'] = f"配置错误：{e}"
         except Exception as e:
             result['message'] = f"连接失败：{str(e)}"
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError as e:
+                    logger.warning(f"删除临时 kubeconfig 文件失败：{e}")
 
         return result
 

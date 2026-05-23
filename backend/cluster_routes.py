@@ -1,10 +1,15 @@
 """
 集群管理 API 路由
 """
-from fastapi import APIRouter, HTTPException, Body
+import os
+import re
+import hashlib
+import logging
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import shutil
+
+logger = logging.getLogger(__name__)
 
 from database import (
     create_cluster, get_cluster, get_all_clusters, get_active_cluster,
@@ -77,20 +82,22 @@ async def get_cluster_detail(cluster_id: int):
     return {"cluster": cluster}
 
 
+def _safe_filename(name: str) -> str:
+    """将集群名称转换为安全的文件名（只允许字母、数字、连字符、下划线）"""
+    return re.sub(r'[^a-zA-Z0-9_-]', '_', name)[:64]
+
+
 @router.post("")
 async def create_cluster_api(request: ClusterCreateRequest):
     """创建新集群"""
-    import os
-    import tempfile
-
     # 生成 kubeconfig 文件路径
     kubeconfig_dir = os.path.join(os.path.dirname(__file__), "kubeconfigs")
     os.makedirs(kubeconfig_dir, exist_ok=True)
 
-    # 生成唯一文件名
-    import hashlib
-    file_hash = hashlib.md5(request.kubeconfig_content.encode()).hexdigest()[:8]
-    kubeconfig_path = os.path.join(kubeconfig_dir, f"{request.name}-{file_hash}.yaml")
+    # 生成唯一文件名（使用安全的名称 + 内容哈希）
+    safe_name = _safe_filename(request.name)
+    file_hash = hashlib.sha256(request.kubeconfig_content.encode()).hexdigest()[:12]
+    kubeconfig_path = os.path.join(kubeconfig_dir, f"{safe_name}-{file_hash}.yaml")
 
     # 写入 kubeconfig 文件
     with open(kubeconfig_path, 'w', encoding='utf-8') as f:
@@ -123,7 +130,7 @@ async def create_cluster_api(request: ClusterCreateRequest):
 
     return {
         "cluster_id": cluster_id,
-        "status": result['status'] if not result['success'] else 'created',
+        "status": "created" if result['success'] else "connection_failed",
         "connection_test": result
     }
 
@@ -144,23 +151,20 @@ async def update_cluster_api(cluster_id: int, request: ClusterUpdateRequest):
         update_data['description'] = request.description
 
     if request.kubeconfig_content is not None:
-        import os
-        import tempfile
-        import hashlib
-
         # 删除旧的 kubeconfig 文件
         if cluster.get('kubeconfig_path') and os.path.exists(cluster['kubeconfig_path']):
             try:
                 os.unlink(cluster['kubeconfig_path'])
-            except:
-                pass
+            except OSError as e:
+                logger.warning(f"删除旧 kubeconfig 文件失败：{e}")
 
         # 创建新的 kubeconfig 文件
         kubeconfig_dir = os.path.join(os.path.dirname(__file__), "kubeconfigs")
         os.makedirs(kubeconfig_dir, exist_ok=True)
 
-        file_hash = hashlib.md5(request.kubeconfig_content.encode()).hexdigest()[:8]
-        kubeconfig_path = os.path.join(kubeconfig_dir, f"{request.name or cluster['name']}-{file_hash}.yaml")
+        safe_name = _safe_filename(request.name or cluster['name'])
+        file_hash = hashlib.sha256(request.kubeconfig_content.encode()).hexdigest()[:12]
+        kubeconfig_path = os.path.join(kubeconfig_dir, f"{safe_name}-{file_hash}.yaml")
 
         with open(kubeconfig_path, 'w', encoding='utf-8') as f:
             f.write(request.kubeconfig_content)
@@ -195,12 +199,11 @@ async def delete_cluster_api(cluster_id: int):
         raise HTTPException(status_code=404, detail="集群不存在")
 
     # 删除 kubeconfig 文件
-    import os
     if cluster.get('kubeconfig_path') and os.path.exists(cluster['kubeconfig_path']):
         try:
             os.unlink(cluster['kubeconfig_path'])
-        except:
-            pass
+        except OSError as e:
+            logger.warning(f"删除 kubeconfig 文件失败：{e}")
 
     delete_cluster(cluster_id)
 
@@ -251,22 +254,9 @@ async def activate_cluster(cluster_id: int):
 @router.post("/test")
 async def test_cluster_connection(request: ClusterTestRequest):
     """测试集群连接"""
-    import tempfile
-    import os
-
-    # 创建临时文件
-    fd, temp_path = tempfile.mkstemp(suffix='.yaml', prefix='kubeconfig_test_')
-    try:
-        os.write(fd, request.kubeconfig_content.encode('utf-8'))
-        os.close(fd)
-
-        result = cluster_manager.test_connection(temp_path)
-        return result
-    finally:
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    # 传入内容，让 test_connection 内部处理临时文件的创建和清理
+    result = cluster_manager.test_connection("__content_only__", request.kubeconfig_content)
+    return result
 
 
 @router.get("/{cluster_id}/info")
